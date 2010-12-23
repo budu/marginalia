@@ -188,6 +188,8 @@
     [:td {:class "spacer docs"} "&nbsp;"]
     [:td {:class "codes"}]]))
 
+;; ## Stylesheet Snippets
+
 (def reset-css
   (css [:html {:margin 0 :padding 0}]
        [:h1 {:margin 0 :padding 0}]
@@ -262,7 +264,9 @@
            :font-family "'Palatino Linotype', 'Book Antiqua', Palatino, FreeSerif, serif;"
            :font-size "16px"
            :color "#252519"}]
-   [:h1 {:font-size "20px"
+   [:h1 {:font-size "24px"
+         :margin-top 0}]
+   [:h2 {:font-size "20px"
          :margin-top 0}]
    [:a.anchor {:text-decoration "none"
               :color "#252519"}]
@@ -301,12 +305,16 @@
            :padding-right "3px"
            :font-size "14px"}]
    [:.syntaxhighlighter :code {:font-size "13px"}]
+   [:.syntaxhighlighter {:overflow "hidden !important"}]
    [:.footer {:text-align "center"}]))
 
-(defn page-template [header toc floating-toc content]
+;; # Uberdoc Html Template
+
+(defn page-template
   "Notice that we're inlining the css & javascript for [SyntaxHighlighter](http://alexgorbatchev.com/SyntaxHighlighter/) (`inline-js`
    & `inline-css`) to be able to package the output as a single file (uberdoc if you will).  It goes without
    saying that all this is WIP and will prabably change in the future."
+  [header toc floating-toc content]
   (html
    (doctype :html5)
    [:html
@@ -318,8 +326,6 @@
      (inline-js "app.js")
      #_[:script {:type "text/javascript" :src "./../resources/app.js"}]
      (inline-css "shCore.css")
-     (css
-      [:.syntaxhighlighter {:overflow "hidden !important"}])
      (inline-css "shThemeEclipse.css")
      reset-css
      header-css

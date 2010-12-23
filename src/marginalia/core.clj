@@ -4,7 +4,8 @@
   (:require [clojure.java.io :as io]
             [clojure.string  :as str])
   (:use [marginalia.html :only (uberdoc-html)]
-        [clojure.contrib.find-namespaces :only (read-file-ns-decl)]))
+        [clojure.contrib.find-namespaces :only (read-file-ns-decl)]
+        [clojure.contrib.reflect :only (get-field)]))
 
 
 (def *test* "./src/cljojo/core.clj")
@@ -41,7 +42,7 @@
        (map #(.getAbsolutePath %))))
 
 
-;; ## Project Info Parsing
+;; ## Project File Analysis
 ;; Marginalia will parse info out of your project.clj to display in
 ;; the generated html file's header.
 ;;
@@ -79,15 +80,6 @@
 
 
 ;; ## Source File Analysis
-
-;; This line should be replaced
-;; and this one too!
-(defn parse [src]
-  (for [line (line-seq src)]
-    (if (re-find *comment* line)
-      {:docs-text (str (str/replace line *comment* ""))}
-      {:code-text (str line)})))
-
 
 (defn end-of-block? [cur-group groups lines]
   (let [line (first lines)
@@ -144,7 +136,75 @@
             (= "" (str/trim (str line)))))
       (catch Exception e nil))))
 
+(comment
+  (call-method clojure.lang.LispReader "getMacro" [Integer/TYPE] nil \;)
+
+  (seq (get-field clojure.lang.LispReader :macros nil))
+
+  (def old-comment-reader (nth (get-field clojure.lang.LispReader :macros nil) (int \;)))
+
+  (nth (get-field clojure.lang.LispReader :macros nil) (int \@))
+
+  (use 'clojure.contrib.reflect)
+
+  (parse ";; Some Comment
+        (defn hello-world
+          \"here's the docstring\"
+          [name] ; inline comment
+          (pritnln \"hello\" name \"!\"))
+        ;; Some Other Comment
+        ([the quick brown fox jumps over the lazy dog])")
+
+  (pprint (parse (slurp "./src/marginalia/html.clj")))
+
+  ;;-> [";; Some Comment" (defn hello-world [name] (pritnln "hello" name "!"))]
+
+  (def lr (clojure.lang.LispReader.))
+
+  (identity clojure.lang.LispReader/macros)
+
+  (clojure.lang.LispReader/getMacro 10)
+
+  (.getMacro lr 10)
+
+  (pprint (group-forms (parse ";; Some Comment
+        (defn hello-world
+          \"here's the docstring\"
+          [name] ; inline comment
+          (pritnln \"hello\" name \"!\"))
+        ;; Some Other Comment
+        ([the quick brown fox jumps over the lazy dog])")))
+)
+
+
+(use 'clojure.pprint)
+#_(println (parse ";; Some Comment
+        (defn hello-world
+          \"here's the docstring\"
+          [name] ; inline comment
+          (pritnln \"hello\" name\"!\"))
+        ;; Some Other Comment
+        ([the quick brown fox jumps over the lazy dog])"))
+
+
+(defn read-comment [reader semicolon]
+  (let [sb (StringBuilder.)]
+    (.append sb semicolon)
+    (loop [ch (char (.read reader))]
+      (if (or (= ch \newline)
+              (= ch \return)
+              (= ch -1))
+        (do
+          (.unread reader (int ch))
+          (.toString sb))
+        (do
+          (.append sb (Character/toString ch))
+          (recur (char (.read reader))))))))
+
 (defn parse [src]
+  "The workhorse of marginalia's parsing engine.  Pass in a string containing Clojure code, and you'll get back a map containing the analyzed content.
+
+   This function iterates over `src` line-by-line, tagging each as either code, docs (comments) or docstring."             
   (loop [[line & more] (line-seq src) cnum 1 dnum 0 sections []]
     (if more
       (if (re-find *comment* line)
@@ -160,6 +220,129 @@
                  (conj sections {:code-text (str line) :line cnum}))))
       sections)))
 
+(defn drop-nth [n coll]
+  "http://groups.google.com/group/clojure/browse_thread/thread/d0ecd17cdeb740f7"
+  (lazy-seq 
+    (when-let [s (seq coll)] 
+      (concat (take n s) (drop-nth n (next (drop n s))))))) 
+
+
+(defn index-of [el col]
+  (loop [col col
+         i 0]
+    (cond
+     (empty? col) nil
+     (= (first col) el) i
+     :else (recur (rest col) (inc i)))))
+
+
+(defn pick-docstring [dfn]
+  (let [first-symbol-str (str (first dfn))]
+    (when (or (= "defn" first-symbol-str)
+              (= "ns" first-symbol-str))
+      (let [without-cruft (->> dfn
+                               (filter #(not (re-find #"^;" (str %))))
+                               (filter #(not= 'MARG_NEWLINE %))
+                               (filter #(not= 'MARG_SPACE %)))
+            third-symbol (when (> (count without-cruft) 2)
+                           (nth without-cruft 2))]
+        (if (string? third-symbol)
+          (let [i (index-of third-symbol dfn)]
+            [third-symbol (drop-nth i dfn)]))))))
+
+#_(pick-docstring '(defn hello-world MARG_NEWLINE MARG_NEWLINE"docstring" MARG_NEWLINE [stuff]))
+
+(defn tag-docstrings [col form]
+  (if-not (and (:code-form form)
+               (seq? (:code-form form)))
+    (conj col form)
+    (let [code-form (:code-form form)
+          inline-comments (filter #(re-find #"^;" (str %))
+                                  code-form)
+          without-inline-comments (filter #(not (re-find #"^;" (str %))) code-form)
+          [docstring without-docstring] (pick-docstring without-inline-comments)]
+      (if docstring
+        (conj col
+              {:docstring-form (apply str
+                                      docstring
+                                      (interleave
+                                       (repeat "\n") inline-comments))
+               :line (:line form)}
+              {:code-form without-docstring
+               :line (:line form)})
+        (conj col form)))))
+
+#_(aget (get-field clojure.lang.MargLispReader :macros nil) (int \;))
+
+#_(tag-docstrings [] 
+                  {:code-form 'MARG_NEWLINE, :line 8})
+
+(defn replace-in [find replace col]
+  (cond
+   (seq? col) (map #(if (= find %) replace %) col)
+   (= find col) replace
+   :else col))
+
+(defn reconstruct-whitespace [form]
+  (if (:code-form form)
+    (assoc form
+      :code-form (->> (:code-form form)
+                           (replace-in 'MARG_SPACE " ")
+                           (replace-in 'MARG_NEWLINE "\n")))
+    form))
+
+
+(defn parse [src]
+  (aset (get-field clojure.lang.MargLispReader :macros nil) (int \;) read-comment)
+  (let [rdr (do
+              (clojure.lang.LineNumberingPushbackReader.
+               (java.io.StringReader. src)))
+        forms (take-while
+               #(not (nil? (:form %)))
+               (repeatedly (fn [] {:form (clojure.lang.MargLispReader/read rdr false nil false) :line (.getLineNumber rdr)})))]
+    #_forms
+    (->> forms
+         (map #(cond
+                (re-find #"^;" (str (:form %))) {:comment-form (:form %)
+                                                 :line (:line %)}
+                :else {:code-form (:form %)
+                       :line (:line %)}))
+         (reduce tag-docstrings [])
+         (map reconstruct-whitespace))))
+
+(pprint (parse ";; Some Comment
+ (defn hello-world
+   \"here's the
+     multi-line docstring\"
+    [name] ; inline comment
+    (pritnln \"hello\" name \"!\"))
+ ;; Some Other Comment
+ ([the quick brown fox jumps over the lazy dog])"))
+
+(defn end-of-block? [cur-group groups forms]
+  (let [cur-form (first forms)
+        next-form (second forms)]
+    (and (:code-form cur-form)
+         (or (:docstring-form next-form)
+             (:comment-form next-form)))))
+
+(defn merge-form [form m]
+  (cond
+   (:docstring-form form) (assoc m :docs (conj (get m :docs []) form))
+   (:code-form form) (assoc m :codes (conj (get m :codes []) form))
+   (:comment-form form) (assoc m :docs (conj (get m :docs []) form))))
+
+(defn group-forms [tagged-forms]
+  (loop [cur-group {}
+         groups []
+         forms tagged-forms]
+    (cond
+     (empty? forms) (conj groups cur-group)
+     
+     (end-of-block? cur-group groups forms)
+     (recur {} (conj groups (merge-form (first forms) cur-group)) (rest forms))
+
+     :else (recur (merge-form (first forms) cur-group) groups (rest forms)))))
 
 ;; How is this handled?
 ;; I wonder?
@@ -204,7 +387,8 @@
                 (map path-to-doc files-to-analyze))]
     (spit output-file-name source)))
 
-;; ## External Interface (command-line, lein, cake, etc)
+;; ## External Interface
+;; ### (command-line, lein, cake, etc)
 
 (defn format-sources [sources]
   (if (nil? sources)
@@ -220,8 +404,7 @@
     (if-not sources
       (do
         (println "Wrong number of arguments passed to marginalia.")
-        (println "Please present paths to source files as follows:")
-        (usage))
+        (println "Please present paths to source files as follows:"))
       (do
         (println "Generating uberdoc for the following source files:")
         (doseq [s sources]
